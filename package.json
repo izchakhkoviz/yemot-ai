@@ -1,0 +1,16 @@
+{
+  "name": "yemot-ai-ivr",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "latest",
+    "yemot-router2": "latest",
+    "@google/genai": "latest",
+    "@google-cloud/text-to-speech": "latest",
+    "@google-cloud/firestore": "latest",
+    "nodemailer": "latest"
+  }
+}
