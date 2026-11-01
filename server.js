@@ -61,30 +61,47 @@ let ref = null;
 async function getRef() {
   if (ref || process.env.LOCAL_CONFIG) return ref;
   const { Firestore } = await import('@google-cloud/firestore');
-  ref = new Firestore(creds ? { projectId: creds.project_id, credentials: creds } : {}).collection('ivr').doc('config');
+  ref = new Firestore({ ...(creds ? { projectId: creds.project_id, credentials: creds } : {}), databaseId: process.env.FIRESTORE_DATABASE_ID || '(default)' }).collection('ivr').doc('config');
   return ref;
 }
 
 let cache = null, cacheAt = 0;
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout after ' + ms + 'ms')), ms))]);
+
+async function loadStored() {
+  if (process.env.LOCAL_CONFIG) {
+    return fs.existsSync(process.env.LOCAL_CONFIG) ? JSON.parse(fs.readFileSync(process.env.LOCAL_CONFIG, 'utf8')) : {};
+  }
+  const s = await (await getRef()).get();
+  return s.exists ? s.data() : {};
+}
+
 async function getConfig() {
   if (cache && Date.now() - cacheAt < 10000) return cache;
   let stored = {};
-  if (process.env.LOCAL_CONFIG) {
-    if (fs.existsSync(process.env.LOCAL_CONFIG)) stored = JSON.parse(fs.readFileSync(process.env.LOCAL_CONFIG, 'utf8'));
-  } else {
-    const s = await (await getRef()).get();
-    if (s.exists) stored = s.data();
+  try {
+    stored = await withTimeout(loadStored(), 3000);
+    cache = { ...DEFAULTS, ...stored };
+    cacheAt = Date.now();
+  } catch (e) {
+    // המסד לא זמין: ממשיכים עם ההגדרות האחרונות או ברירות המחדל, ומנסים שוב בעוד דקה
+    console.error('CONFIG LOAD FAILED, using fallback:', e.message);
+    cache = cache || { ...DEFAULTS };
+    cacheAt = Date.now() + 50000;
   }
-  cache = { ...DEFAULTS, ...stored };
-  cacheAt = Date.now();
   return cache;
 }
 
 async function saveConfig(patch) {
   const next = { ...(await getConfig()), ...patch };
-  if (process.env.LOCAL_CONFIG) fs.writeFileSync(process.env.LOCAL_CONFIG, JSON.stringify(next, null, 2));
-  else await (await getRef()).set(next);
   cache = next; cacheAt = Date.now();
+  try {
+    if (process.env.LOCAL_CONFIG) fs.writeFileSync(process.env.LOCAL_CONFIG, JSON.stringify(next, null, 2));
+    else await withTimeout((await getRef()).set(next), 5000);
+  } catch (e) {
+    console.error('CONFIG SAVE FAILED (kept in memory only):', e.message);
+    next._notPersisted = true;
+  }
   return next;
 }
 
@@ -303,6 +320,9 @@ adminApi.post('/tts-preview', async (q, r) => {
 });
 
 // ===== server.js =====
+
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
