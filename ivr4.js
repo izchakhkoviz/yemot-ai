@@ -57,6 +57,16 @@ const STYLES = {
   energetic: 'אנרגטי ונלהב, עם חיוך בקול.'
 };
 
+// קולות Wavenet עבריים של גוגל (משתמשים בקרדיט)
+const VOICES = [
+  { name: 'he-IL-Wavenet-A', label: 'קול נשי א' },
+  { name: 'he-IL-Wavenet-B', label: 'קול גברי ב' },
+  { name: 'he-IL-Wavenet-C', label: 'קול נשי ג' },
+  { name: 'he-IL-Wavenet-D', label: 'קול גברי ד' }
+];
+
+const STYLE_LABELS = { warm: 'חם וידידותי', formal: 'מקצועי', brief: 'קצר ועניני', humorous: 'הומוריסטי', calm: 'רגוע', energetic: 'אנרגטי' };
+
 const days = Array.from({ length: 7 }, (_, i) => ({ open: i !== 6, from: '08:00', to: '20:00' }));
 
 const DEFAULTS = {
@@ -111,7 +121,7 @@ async function getConfig() {
     // המסד לא זמין: ממשיכים עם ההגדרות האחרונות או ברירות המחדל, ומנסים שוב בעוד דקה
     console.error('CONFIG LOAD FAILED, using fallback:', e.message);
     cache = cache || { ...DEFAULTS };
-    cacheAt = Date.now() + 590000;
+    cacheAt = Date.now() - 10000 + 60000; // תוקף cache של דקה בלבד
   }
   return cache;
 }
@@ -124,7 +134,6 @@ async function saveConfig(patch) {
     else await withTimeout((await getRef()).set(next), 5000);
   } catch (e) {
     console.error('CONFIG SAVE FAILED (kept in memory only):', e.message);
-    next._notPersisted = true;
   }
   return next;
 }
@@ -144,7 +153,9 @@ function isOpen(cfg) {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: cfg.schedule.tz || 'Asia/Jerusalem', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
   const get = (t) => parts.find((x) => x.type === t).value;
   const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday'));
-  const now = `${get('hour')}:${get('minute')}`;
+  // חצות עלול להופיע כ-24 בחלק מהגרסאות, לכן מנרמלים
+  const hh = String(Number(get('hour')) % 24).padStart(2, '0');
+  const now = `${hh}:${get('minute')}`;
   const d = cfg.schedule.days[dow];
   return !!d?.open && now >= d.from && now < d.to;
 }
@@ -194,6 +205,9 @@ const mailer = () => nodemailer.createTransport({
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
 });
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const MAX_MAILS_PER_CALL = 3;
+
 const S = 'STRING';
 function declarations(cfg) {
   const d = [{
@@ -208,7 +222,7 @@ function declarations(cfg) {
   });
   if (cfg.tools.email) d.push({
     name: 'send_email',
-    description: 'שולח מייל. קרא לפונקציה רק אחרי שהמתקשר אישר את הכתובת ואת התוכן.',
+    description: 'שולח מייל לכתובת שהמתקשר הקליד או אמר. קרא לפונקציה רק אחרי שהמתקשר אישר את הכתובת ואת התוכן.',
     parameters: { type: 'OBJECT', properties: {
       to: { type: S, description: 'כתובת הנמען' },
       subject: { type: S }, body: { type: S, description: 'גוף המייל המלא' },
@@ -254,11 +268,23 @@ async function runTool(name, args, ctx) {
     }
 
     case 'send_email': {
+      const to = String(args.to || '').trim();
+      if (!EMAIL_RE.test(to)) return { error: 'כתובת המייל לא תקינה. בקש מהמתקשר להקליד אותה שוב' };
+      if ((ctx.mailCount || 0) >= MAX_MAILS_PER_CALL) return { error: 'הגעתם למגבלת המיילים לשיחה הזו' };
+      ctx.mailCount = (ctx.mailCount || 0) + 1;
+
       const attachments = (args.attachment_ids || []).filter((i) => ctx.assets.has(i)).map((i, n) => {
-        const a = ctx.assets.get(i); return { filename: `image${n + 1}.${a.mime.split('/')[1] || 'png'}`, content: a.data, contentType: a.mime };
+        const a = ctx.assets.get(i);
+        return { filename: `image${n + 1}.${a.mime.split('/')[1] || 'png'}`, content: a.data, contentType: a.mime };
       });
-      await mailer().sendMail({ from: process.env.MAIL_FROM, to: args.to, subject: args.subject, text: args.body, attachments });
-      return { sent: true };
+      try {
+        const info = await mailer().sendMail({ from: process.env.MAIL_FROM, to, subject: args.subject || '', text: args.body || '', attachments });
+        console.log('MAIL SENT', info.messageId, 'to', to);
+        return { sent: true };
+      } catch (e) {
+        console.error('MAIL FAILED:', e.message);
+        return { error: 'שליחת המייל נכשלה: ' + e.message };
+      }
     }
 
     case 'send_fax': {
@@ -287,7 +313,7 @@ function buildSystemPrompt(cfg) {
     `סגנון דיבור: ${STYLES[cfg.style] || STYLES.warm}`,
     cfg.customInstructions,
     `זו שיחת טלפון בעברית עם אדם אמיתי. דבר בדיוק כמו בן אדם בשיחה: משפטים קצרים וטבעיים (עד 2-3 משפטים בתשובה), עברית מדוברת ולא כתובה, בלי רשימות, בלי כוכביות או עיצוב, בלי אימוג'ים. מספרים ותאריכים כתוב במילים. אל תשתמש בתבניות קבועות ואל תחזור על אותם ניסוחים; הגב למה שנאמר, שאל שאלות המשך כשזה טבעי, ואם לא הבנת אל תנחש, שאל שוב.`,
-    `כשצריך לשלוח משהו (מייל או פקס), שאל כמו נציג אנושי לאן לשלוח, אשר את הפרטים בקול לפני השליחה, ורק אז שלח. אם אתה צריך כתובת מייל, העדף לבקש מהמתקשר להקליד אותה במקלדת. אחרי השליחה אשר שזה נשלח.`,
+    `כשצריך לשלוח מייל, שאל כמו נציג אנושי לאן לשלוח, אשר את הפרטים בקול לפני השליחה, ורק אז שלח. אם אתה צריך כתובת מייל, העדף לבקש מהמתקשר להקליד אותה במקלדת. אחרי השליחה אשר שזה נשלח, או הסבר בקצרה מה השתבש.`,
     `אם הטקסט שהתקבל מהזיהוי הקולי נראה משובש, שאל בנימוס שוב במקום לנחש. אל תמציא עובדות על העסק.`
   ].filter(Boolean).join('\n\n');
 }
@@ -334,7 +360,8 @@ adminApi.get('/config', async (_q, r) => r.json(await getConfig()));
 adminApi.put('/config', async (q, r) => r.json(await saveConfig(q.body)));
 adminApi.get('/options', (_q, r) => r.json({
   presets: Object.entries(PRESETS).map(([id, p]) => ({ id, label: p.label })),
-  styles: Object.keys(STYLES)
+  styles: Object.keys(STYLES),
+  voices: VOICES
 }));
 adminApi.get('/voices', async (_q, r) => r.json(await listVoices('he-IL')));
 // האזנה לקול לפני בחירה: מחזיר MP3 ב-base64
@@ -358,13 +385,14 @@ app.get('/test', async (q, r) => {
   if (!process.env.ADMIN_TOKEN || q.query.token !== process.env.ADMIN_TOKEN) return r.status(401).send('unauthorized');
   const out = {};
   const step = async (name, fn) => { const t = Date.now(); try { out[name] = { ok: true, ms: Date.now() - t, info: await fn() }; } catch (e) { out[name] = { ok: false, ms: Date.now() - t, error: String(e.message || e).slice(0, 300) }; } };
-  await step('env', async () => ({ project: process.env.GOOGLE_CLOUD_PROJECT, hasCreds: !!creds, hasApiKey: !!apiKey, adminTokenLength: (process.env.ADMIN_TOKEN || '').length, yemotNumber: !!process.env.YEMOT_NUMBER, yemotPassword: !!process.env.YEMOT_PASSWORD, voice: (await getConfig()).voice.provider }));
+  await step('env', async () => ({ project: process.env.GOOGLE_CLOUD_PROJECT, hasCreds: !!creds, hasApiKey: !!apiKey, yemotNumber: !!process.env.YEMOT_NUMBER, yemotPassword: !!process.env.YEMOT_PASSWORD, smtpHost: process.env.SMTP_HOST || null, smtpUserSet: !!process.env.SMTP_USER, smtpPassSet: !!process.env.SMTP_PASS, mailFromSet: !!process.env.MAIL_FROM, voice: (await getConfig()).voice.provider }));
+  await step('smtp', async () => { await mailer().verify(); return 'SMTP ok'; });
   await step('gemini', async () => { const res = await gen({ model: (await getConfig()).model, contents: 'ענה במילה אחת: שלום' }); return res.text; });
   await step('tts', async () => (await synth('שלום', { name: 'he-IL-Wavenet-A' })).length + ' bytes');
   await step('yemot_upload', async () => { await uploadWav(await synth('בדיקה', { name: 'he-IL-Wavenet-A' }), '/ApiAudio/test_upload.wav'); return 'uploaded'; });
   r.json(out);
 });
-   // אתר הניהול מתחבר לכאן
+// אתר הניהול מתחבר לכאן
 
 const router = YemotRouter({
   printLog: true,
@@ -435,7 +463,7 @@ router.get('/chat', async (call) => {
   if (!isOpen(cfg)) { await say(cfg.closedMessage); return call.hangup(); }
 
   const callId = randomUUID().slice(0, 8);
-  const ctx = { call, assets: new Map(), ended: false };
+  const ctx = { call, assets: new Map(), ended: false, mailCount: 0 };
   const history = [];
   const started = Date.now();
   let n = 0, silent = 0;
@@ -479,19 +507,42 @@ router.get('/admin', async (call) => {
   const pin = await call.read([{ type: 'text', data: 'הקישו קוד סודי' }], 'tap', { max_digits: 12, min_digits: 1 });
   if (!process.env.ADMIN_PIN || pin !== process.env.ADMIN_PIN) { await call.id_list_message([{ type: 'text', data: 'קוד שגוי' }]); return call.hangup(); }
   const cfg = await getConfig();
-  const ids = Object.keys(PRESETS);
-  const choice = await call.read([{ type: 'text',
-    data: ym(`למצב פעיל או כבוי הקישו 1 לבחירת תפקיד הקישו 2 כרגע השירות ${cfg.enabled ? 'פעיל' : 'כבוי'}`) }], 'tap', { max_digits: 1, min_digits: 1 });
-  if (choice === '1') { await saveConfig({ enabled: !cfg.enabled }); await call.id_list_message([{ type: 'text', data: cfg.enabled ? 'השירות כובה' : 'השירות הופעל' }]); }
+  const choice = await call.read([{ type: 'text', data: ym(
+    `למצב פעיל או כבוי הקישו 1. לתפקיד הקישו 2. לקול הקישו 3. לסגנון דיבור הקישו 4. כרגע השירות ${cfg.enabled ? 'פעיל' : 'כבוי'}`) }], 'tap', { max_digits: 1, min_digits: 1 });
+
+  if (choice === '1') {
+    await saveConfig({ enabled: !cfg.enabled });
+    await call.id_list_message([{ type: 'text', data: cfg.enabled ? 'השירות כובה' : 'השירות הופעל' }]);
+  }
+
   if (choice === '2') {
+    const ids = Object.keys(PRESETS);
     const menu = ids.map((id, i) => `${PRESETS[id].label} הקישו ${i + 1}`).join('. ');
     const c = await call.read([{ type: 'text', data: ym(menu) }], 'tap', { max_digits: 1, min_digits: 1 });
     const id = ids[Number(c) - 1];
     if (id) { await saveConfig({ role: id }); await call.id_list_message([{ type: 'text', data: 'התפקיד עודכן' }]); }
   }
+
+  if (choice === '3') {
+    const menu = VOICES.map((v, i) => `${v.label} הקישו ${i + 1}`).join('. ');
+    const c = await call.read([{ type: 'text', data: ym(menu) }], 'tap', { max_digits: 1, min_digits: 1 });
+    const v = VOICES[Number(c) - 1];
+    if (v) {
+      await saveConfig({ voice: { ...cfg.voice, name: v.name, provider: 'google' } });
+      await call.id_list_message([{ type: 'text', data: 'הקול עודכן' }]);
+    }
+  }
+
+  if (choice === '4') {
+    const keys = Object.keys(STYLES);
+    const menu = keys.map((k, i) => `${STYLE_LABELS[k]} הקישו ${i + 1}`).join('. ');
+    const c = await call.read([{ type: 'text', data: ym(menu) }], 'tap', { max_digits: 1, min_digits: 1 });
+    const k = keys[Number(c) - 1];
+    if (k) { await saveConfig({ style: k }); await call.id_list_message([{ type: 'text', data: 'הסגנון עודכן' }]); }
+  }
+
   return call.hangup();
 });
 
 app.use('/', router);
 app.listen(process.env.PORT || 8080, () => console.log('STARTED', JSON.stringify({ credsOk: !!creds, apiKey: !!apiKey, adminTokenLength: (process.env.ADMIN_TOKEN || '').length })));
-
