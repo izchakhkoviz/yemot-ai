@@ -490,7 +490,9 @@ async function runTool(name, args, ctx) {
       if (!prompt) return { error: 'חסר תיאור לשיר' };
       const t = currentTenant();
       if (!(await countGeneration(t.id, t.doc?.dailyGenerationLimit))) return { error: 'הגעתם למכסת היצירות להיום' };
-      const buf = await makeSong(prompt);
+      let buf;
+      try { buf = await makeSong(prompt); }
+      catch (e) { console.error('SONG FAILED:', e.message); return { error: 'לא הצלחתי ליצור שיר: ' + String(e.message).slice(0, 150) }; }
       const id = randomUUID().slice(0, 8);
       ctx.assets.set(id, { mime: 'audio/wav', data: buf });
       return { asset_id: id };
@@ -721,6 +723,7 @@ app.get('/test', async (q, r) => {
   await step('voices', async () => (await listVoices('he-IL')).map((v) => v.name).join(', '));
   await step('gemini', async () => { const res = await gen({ model: (await getConfig()).model, contents: 'ענה במילה אחת: שלום' }); return res.text; });
   await step('tts', async () => (await synth('שלום', { name: 'he-IL-Wavenet-A' })).length + ' bytes');
+  await step('song', async () => (await makeSong('short calm piano melody')).length + ' bytes');
   await step('yemot_upload', async () => { await uploadWav(await synth('בדיקה', { name: 'he-IL-Wavenet-A' }), '/ApiAudio/test_upload.wav'); return 'uploaded'; });
   r.json(out);
 });
