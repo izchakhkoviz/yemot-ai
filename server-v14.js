@@ -522,10 +522,16 @@ const MAIL_MAX = 3.5 * 1024 * 1024;   // מעל זה שולחים קישור ב�
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function makeSong(prompt) {
-  const http = await client.auth.getClient();
+  const token = await client.auth.getAccessToken();   // אישור גישה מפורש לגוגל
   const project = process.env.GOOGLE_CLOUD_PROJECT || creds?.project_id;
   const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${project}/locations/us-central1/publishers/google/models/${MUSIC_MODEL}:predict`;
-  const r = await http.request({ url, method: 'POST', data: { instances: [{ prompt }], parameters: { sample_count: 1 } }, timeout: 120000 });
+  const res = await withTimeout(fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instances: [{ prompt }], parameters: { sample_count: 1 } })
+  }), 120000);
+  const r = { data: await res.json().catch(() => ({})) };
+  if (!res.ok) throw new Error(JSON.stringify(r.data?.error || r.data).slice(0, 200));
   const p = r.data?.predictions?.[0];
   if (!p?.bytesBase64Encoded) throw new Error('לא נוצר שיר');
   return Buffer.from(p.bytesBase64Encoded, 'base64');
