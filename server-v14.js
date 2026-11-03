@@ -151,6 +151,7 @@ async function getConfig() {
   try {
     stored = await withTimeout(loadStored(), 3000);
     cache = { ...DEFAULTS, ...stored };
+    cache.tools = { ...DEFAULTS.tools, ...(stored.tools || {}) };
     // הקול תמיד של גוגל, אלא אם מוגדר במפורש VOICE_PROVIDER=yemot
     cache.voice = { ...DEFAULTS.voice, ...(stored.voice || {}), provider: process.env.VOICE_PROVIDER || 'google' };
     cacheAt = Date.now();
@@ -246,7 +247,7 @@ const yemotCred = () => {
 
 function tenantConfig(doc) {
   const c = doc.config || {};
-  return { ...DEFAULTS, ...c, voice: { ...DEFAULTS.voice, ...(c.voice || {}), provider: 'google' } };
+  return { ...DEFAULTS, ...c, tools: { ...DEFAULTS.tools, ...(c.tools || {}) }, voice: { ...DEFAULTS.voice, ...(c.voice || {}), provider: 'google' } };
 }
 
 // מכסת שיחות יומית למשתמש, כדי שלא ייגמר הקרדיט של הבעלים
