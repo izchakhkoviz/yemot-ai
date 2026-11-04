@@ -1,6 +1,6 @@
 import express from 'express';
 import { YemotRouter } from 'yemot-router2';
-import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import nodemailer from 'nodemailer';
@@ -117,7 +117,7 @@ const DEFAULTS = {
   deniedMessage: 'מצטערים, אין לך הרשאה להשתמש בשירות זה.',
   closedMessage: 'השירות סגור כעת. אנא חזרו בשעות הפעילות.',
   schedule: { enabled: false, tz: 'Asia/Jerusalem', days }, // days[0]=ראשון
-  tools: { email: true, fax: !!process.env.FAX_WEBHOOK_URL, images: true, music: true, video: true },
+  tools: { email: true, fax: false, images: true, music: true, video: true },
   model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
   maxMinutes: 10,
   useNikud: false,
@@ -395,7 +395,6 @@ async function sendMail({ to, subject, text, attachments = [] }) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const MAX_MAILS_PER_CALL = 3;
-const MAX_FAXES_PER_CALL = 3;
 
 const S = 'STRING';
 function declarations(cfg) {
@@ -419,11 +418,6 @@ function declarations(cfg) {
     }, required: ['to', 'subject', 'body'] }
   });
   if (cfg.tools.fax) d.push({
-    name: 'ask_fax_number_by_keypad',
-    description: 'מבקש מהמתקשר להקליד את מספר הפקס במקלדת הטלפון. השתמש תמיד כשצריך מספר פקס, ולא לבקש אותו בקול.',
-    parameters: { type: 'OBJECT', properties: {} }
-  });
-  if (cfg.tools.fax) d.push({
     name: 'send_fax',
     description: 'שולח פקס. קרא רק אחרי שהמתקשר אישר את המספר ואת התוכן.',
     parameters: { type: 'OBJECT', properties: {
@@ -434,11 +428,10 @@ function declarations(cfg) {
     name: 'create_song',
     description: 'יוצר שיר שלם בעברית, עם מילים ושירה, לפי תיאור. השיר נוצר ברקע ונשלח למייל שהמתקשר נתן, בעוד כמה דקות. קרא רק כשהמתקשר ביקש שיר, אישר את התיאור, את אורכו ואת כתובת המייל.',
     parameters: { type: 'OBJECT', properties: {
-      prompt: { type: S, description: 'תיאור מוזיקלי של השיר באנגלית בלבד: סגנון, מצב רוח, כלים, קצב, ומין הזמר. אל תכתוב כאן מילים' },
-      lyrics: { type: S, description: 'המילים המלאות של השיר, בעברית בלבד, עם בתים ופזמון. כתוב מספיק בתים לאורך שביקשו: בערך 2 בתים לדקה של שיר' },
+      prompt: { type: S, description: 'תיאור השיר: על מה הוא, סגנון, מצב רוח, כלים, ומה המילים צריכות לומר. עדיף באנגלית או בעברית' },
       duration: { type: 'INTEGER', description: 'אורך השיר בשניות, בין 30 ל-180. שיר קצר כ-60, בינוני כ-120, ארוך כ-180' },
       to: { type: S, description: 'כתובת המייל לשליחת השיר' }
-    }, required: ['prompt', 'lyrics', 'to'] }
+    }, required: ['prompt', 'to'] }
   });
   if (cfg.tools.video) d.push({
     name: 'create_video',
@@ -467,13 +460,6 @@ async function runTool(name, args, ctx) {
         [{ type: 'text', data: ym('אנא הקלידו את כתובת המייל במקלדת ובסיום הקישו סולמית') }],
         'tap', { typing_playback_mode: 'EmailKeyboard', max_digits: 80, min_digits: 5, sec_wait: 30 });
       return { email: String(v || '').trim() };
-    }
-
-    case 'ask_fax_number_by_keypad': {
-      const v = await ctx.call.read(
-        [{ type: 'text', data: ym('אנא הקלידו את מספר הפקס ובסיום הקישו סולמית') }],
-        'tap', { max_digits: 15, min_digits: 7, sec_wait: 30 });
-      return { fax_number: String(v || '').trim() };
     }
 
     case 'generate_image': {
@@ -509,26 +495,9 @@ async function runTool(name, args, ctx) {
 
     case 'send_fax': {
       if (!process.env.FAX_WEBHOOK_URL) return { error: 'שירות הפקס עדיין לא הוגדר' };
-      const num = norm(args.fax_number);
-      if (!/^0\d{7,9}$/.test(num)) return { error: 'מספר הפקס לא תקין. בקש מהמתקשר להקליד אותו שוב' };
-      const body = String(args.body || '').trim().slice(0, 5000);
-      if (!body) return { error: 'חסר תוכן לפקס' };
-      if ((ctx.faxCount || 0) >= MAX_FAXES_PER_CALL) return { error: 'הגעתם למגבלת הפקסים לשיחה הזו' };
-      ctx.faxCount = (ctx.faxCount || 0) + 1;
-      try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (process.env.FAX_WEBHOOK_TOKEN) headers.Authorization = `Bearer ${process.env.FAX_WEBHOOK_TOKEN}`;
-        const r = await withTimeout(fetch(process.env.FAX_WEBHOOK_URL, {
-          method: 'POST', headers,
-          body: JSON.stringify({ to: num, subject: String(args.subject || '').slice(0, 200), text: body, tenant: currentTenant().id })
-        }), 20000);
-        if (!r.ok) return { error: 'שליחת הפקס נכשלה: ' + r.status };
-        console.log('FAX SENT to', num);
-        return { sent: true };
-      } catch (e) {
-        console.error('FAX FAILED:', e.message);
-        return { error: 'שליחת הפקס נכשלה: ' + e.message };
-      }
+      const r = await fetch(process.env.FAX_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: args.fax_number, subject: args.subject || '', text: args.body }) });
+      return r.ok ? { sent: true } : { error: 'שליחת הפקס נכשלה: ' + r.status };
     }
     case 'create_song': {
       const to = String(args.to || '').trim();
@@ -539,9 +508,7 @@ async function runTool(name, args, ctx) {
       const t = currentTenant();
       if (!(await countGeneration(t.id, t.doc?.dailyGenerationLimit))) return { error: 'הגעתם למכסת היצירות להיום' };
       // השיר נוצר ברקע, והשיחה לא מחכה לו
-      const lyrics = String(args.lyrics || '').trim().slice(0, 3000);
-      if (lyrics.length < 40) return { error: 'חסרות מילים לשיר. כתוב מילים בעברית ואשר אותן עם המתקשר' };
-      runSongJob(prompt, to, duration, lyrics).catch((e) => console.error('SONG JOB CRASH', e.message));
+      runSongJob(prompt, to, duration).catch((e) => console.error('SONG JOB CRASH', e.message));
       return { started: true, note: 'השיר בדרך, הוא יגיע למייל בעוד כמה דקות' };
     }
 
@@ -566,8 +533,6 @@ async function runTool(name, args, ctx) {
 // lyria-002 מנגן רק בלי שירה. Lyria 3 מייצר שירה עם מילים. Pro עד כ-3 דקות, Clip עד 30 שניות
 const MUSIC_MODEL = process.env.LYRIA_MODEL || 'lyria-3-pro-preview';
 const VIDEO_MODEL = process.env.VEO_MODEL || 'veo-3.0-generate-001';
-// אם המודל לא זמין לפרויקט (שגיאה 404), מנסים את הבאים בתור. זמינות המודלים תלויה בחשבון
-const VIDEO_FALLBACKS = ['veo-3.0-fast-generate-001', 'veo-2.0-generate-001'];
 const MAIL_MAX = 3.5 * 1024 * 1024;   // מעל זה שולחים קישור במקום קובץ מצורף
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -607,6 +572,7 @@ async function makeSongModelsLab(prompt, duration) {
 // ACE Music: API חינמי למודל ACE-Step. מצב sample_mode כותב מילים לפי התיאור בשפה vocal_language
 async function makeSongAceMusic(prompt, duration) {
   const base = process.env.ACE_MUSIC_BASE_URL || 'https://api.acemusic.ai';
+  console.log('ACE REQUEST prompt_len', String(prompt).length, 'prompt_start', JSON.stringify(String(prompt).slice(0, 80)), 'duration', duration);
   let res, body = '';
   // שגיאות 502/503/504 הן בדרך כלל זמניות בצד של השירות, לכן מנסים שוב עם המתנה
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -634,8 +600,7 @@ async function makeSongAceMusic(prompt, duration) {
   return { buf: Buffer.from(m[2], 'base64'), mime: m[1] };
 }
 
-async function makeSong(prompt, duration = SONG_DURATION, lyrics = '') {
-  if (lyrics) prompt = `${prompt}\n\nSung in Hebrew, sung vocals with these exact Hebrew lyrics, the whole song must have singing from start to finish:\n${lyrics}`;
+async function makeSong(prompt, duration = SONG_DURATION) {
   if (process.env.ACEMUSIC_API_KEY) return makeSongAceMusic(prompt, duration);
   if (process.env.MODELSLAB_API_KEY) return makeSongModelsLab(prompt, duration);
   if (MUSIC_MODEL.startsWith('lyria-3')) {
@@ -668,18 +633,7 @@ async function makeSong(prompt, duration = SONG_DURATION, lyrics = '') {
 async function makeVideo(prompt) {
   const config = { numberOfVideos: 1, durationSeconds: 8 };
   if (process.env.VIDEO_GCS_URI) config.outputGcsUri = process.env.VIDEO_GCS_URI;
-  let op = null;
-  for (const model of [VIDEO_MODEL, ...VIDEO_FALLBACKS.filter((m) => m !== VIDEO_MODEL)]) {
-    try {
-      op = await ai.models.generateVideos({ model, prompt, config });
-      console.log('VEO MODEL USED', model);
-      break;
-    } catch (e) {
-      console.error('VEO MODEL FAILED', model, String(e.message || e).slice(0, 200));
-      if (!/404|not found/i.test(String(e.message || e))) throw e;
-    }
-  }
-  if (!op) throw new Error('אף מודל סרטונים לא זמין בפרויקט הזה');
+  let op = await ai.models.generateVideos({ model: VIDEO_MODEL, prompt, config });
   for (let i = 0; i < 60 && !op.done; i++) { await sleep(10000); op = await ai.operations.getVideosOperation({ operation: op }); }
   if (!op.done) throw new Error('יצירת הסרטון ארכה יותר מדי');
   if (op.error) throw new Error(JSON.stringify(op.error).slice(0, 200));
@@ -708,11 +662,11 @@ async function runVideoJob(prompt, to) {
 }
 
 // רץ ברקע, בדומה לסרטון. השיר נשלח במייל כקובץ מצורף אם הוא נכנס למגבלה
-async function runSongJob(prompt, to, duration, lyrics = '') {
+async function runSongJob(prompt, to, duration) {
   const subject = 'השיר שביקשת';
   const text = `שלום, מצורף השיר שביקשתם בשיחה טלפונית.\nהתיאור: ${prompt}`;
   try {
-    const song = await makeSong(prompt, duration, lyrics);
+    const song = await makeSong(prompt, duration);
     const ext = song.mime === 'audio/wav' ? 'wav' : 'mp3';
     if (song.buf.length <= MAIL_MAX) {
       await sendMail({ to, subject, text, attachments: [{ filename: `song.${ext}`, content: song.buf, contentType: song.mime }] });
@@ -759,15 +713,9 @@ function buildSystemPrompt(cfg) {
     `זו שיחת טלפון בעברית עם אדם אמיתי. דבר בדיוק כמו בן אדם בשיחה: משפטים קצרים וטבעיים (עד 2-3 משפטים בתשובה), עברית מדוברת ולא כתובה, בלי רשימות, בלי כוכביות או עיצוב, בלי אימוג'ים. מספרים ותאריכים כתוב במילים. אל תשתמש בתבניות קבועות ואל תחזור על אותם ניסוחים; הגב למה שנאמר, שאל שאלות המשך כשזה טבעי, ואם לא הבנת אל תנחש, שאל שוב.`,
     `כשצריך לשלוח מייל, שאל כמו נציג אנושי לאן לשלוח, אשר את הפרטים בקול לפני השליחה, ורק אז שלח. אם אתה צריך כתובת מייל, העדף לבקש מהמתקשר להקליד אותה במקלדת. אחרי השליחה אשר שזה נשלח, או הסבר בקצרה מה השתבש.`,
     'אם מבקשים שיר או סרטון: אסוף תיאור, בקש את כתובת המייל (עדיף במקלדת), אשר את הפרטים, ורק אז הפעל את הכלי. לשיר שאל גם על האורך: קצר, בינוני או ארוך (עד כ-3 דקות). השיר נוצר ברקע ונשלח למייל בעוד כמה דקות, אז אמור זאת למתקשר ואל תחכה לו בשיחה. סרטון לוקח כמה דקות ונשלח למייל בנפרד, אז אמור למתקשר שיגיע למייל בעוד כמה דקות. אפשר ליצור שירים, תמונות וסרטונים על כמעט כל נושא, כולל ביקורת פוליטית וחברתית, הומור, סיפורים כבדים, וסצנות אלימות בסיפור. אסור: תוכן מיני בכל צורה; קטינים בהקשר מיני או אלים; תוכן שמכפיש אדם אמיתי או מציג אותו עושה או אומר דברים שלא עשה; והסתה לאלימות נגד אדם או קבוצה. אם מבקשים משהו אסור, הסבר בנימוס והצע חלופה קרובה שאפשר לעשות.',
-    `אם מבקשים לשלוח פקס: בקש את מספר הפקס במקלדת (ask_fax_number_by_keypad), אשר את התוכן בקול, ורק אז שלח. אחרי השליחה אשר שנשלח, או הסבר בקצרה מה השתבש.`,
     `אם הטקסט שהתקבל מהזיהוי הקולי נראה משובש, שאל בנימוס שוב במקום לנחש. לעולם אל תגיד למתקשר שהוא קטוע, מגמגם או לא ברור, כי ייתכן שהבעיה בהקלטה ולא בו. אם המשפט נראה חלקי, פשוט בקש בנימוס שישלים. אל תמציא עובדות על העסק.`
   ].filter(Boolean).join('\n\n');
 }
-
-// חשיבה פנימית של המודל משתמשת באותו תקציב טוקנים של התשובה, ולכן מגבילים אותה לשיחה.
-// THINKING_BUDGET=0 מכבה חשיבה לתשובה מהירה יותר. לא מוגדר = ברירת המחדל של המודל
-const THINKING_CONFIG = process.env.THINKING_BUDGET !== undefined && process.env.THINKING_BUDGET !== ''
-  ? { thinkingConfig: { thinkingBudget: Number(process.env.THINKING_BUDGET) } } : {};
 
 // מריץ תור שיחה אחד, כולל כל קריאות הכלים, ומחזיר את הטקסט להשמעה
 async function respond(history, cfg, ctx) {
@@ -775,11 +723,9 @@ async function respond(history, cfg, ctx) {
   for (let i = 0; i < 5; i++) {
     const res = await gen({
       model: cfg.model, contents: history,
-      config: { systemInstruction: buildSystemPrompt(cfg), temperature: 0.8, maxOutputTokens: 1024, ...THINKING_CONFIG,
+      config: { systemInstruction: buildSystemPrompt(cfg), temperature: 0.8, maxOutputTokens: 400,
         ...(tools.length ? { tools: [{ functionDeclarations: tools }] } : {}) }
     });
-    const fr = res.candidates?.[0]?.finishReason;
-    if (fr && fr !== 'STOP') console.error('MODEL FINISH REASON:', fr);
     const content = res.candidates?.[0]?.content;
     if (content) history.push(content);
     const calls = res.functionCalls;
@@ -910,26 +856,16 @@ const router = YemotRouter({
   }});
 
 // הופך טקסט להודעה שימות יכולה להשמיע, בקול של גוגל או בקול המובנה
-// משפטים קבועים (ברכה, "אני כאן", וכו') נשמרים בזיכרון אחרי ההעלאה הראשונה, כדי לחסוך זמן בכל שיחה
-const ttsCache = new Map();
 async function toMessages(cfg, text, callId, n) {
   text = cleanForSpeech(text);
-  if (cfg.voice.provider === 'google' && text) {
-    const key = createHash('sha1').update(`${cfg.voice.name}|${cfg.voice.speakingRate}|${text}`).digest('hex');
-    const cached = ttsCache.get(key);
-    if (cached) return [{ type: 'file', data: cached }];
-    // ניסיון שני לפני נפילה לקול הרובוטי של ימות
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const path = `/ApiAudio/${callId}_${n}`;
-        // מסנתזים ישירות ב-8kHz, כמו הטלפון, כדי למנוע איכות מדולדלת מהמרה
-        await withTimeout((async () => { await uploadWav(await synth(text, cfg.voice, { rate: 8000 }), `${path}.wav`); })(), 12000);
-        console.log('GOOGLE VOICE OK', path);
-        if (text.length <= 300 && ttsCache.size < 500) ttsCache.set(key, path);
-        return [{ type: 'file', data: path }];
-      } catch (e) { console.error(`GOOGLE VOICE FAILED (attempt ${attempt}):`, e.message); }
-    }
-    console.error('GOOGLE VOICE GAVE UP, using Yemot voice');
+  if (cfg.voice.provider === 'google') {
+    try {
+      const path = `/ApiAudio/${callId}_${n}`;
+      // מסנתזים ישירות ב-8kHz, כמו הטלפון, כדי למנוע איכות מדולדלת מהמרה
+      await withTimeout((async () => { await uploadWav(await synth(text, cfg.voice, { rate: 8000 }), `${path}.wav`); })(), 15000);
+      console.log('GOOGLE VOICE OK', path);
+      return [{ type: 'file', data: path }];
+    } catch (e) { console.error('GOOGLE VOICE FAILED, using Yemot voice:', e.message); }
   }
   return [{ type: 'text', data: ym(text) }];
 }
@@ -938,6 +874,8 @@ async function toMessages(cfg, text, callId, n) {
 const ymToken = () => yemotCred();
 
 async function downloadRecording(pathsToTry) {
+  // ימות לפעמים שומרת את ההקלטה אחרי כמה רגעים, לכן מנסים עד 3 פעמים עם המתנה
+  for (let attempt = 0; attempt < 3; attempt++) {
   for (const p of pathsToTry.filter(Boolean)) {
     try {
       const url = 'https://www.call2all.co.il/ym/api/DownloadFile?' + new URLSearchParams({ token: ymToken(), path: 'ivr2:' + p });
@@ -946,6 +884,8 @@ async function downloadRecording(pathsToTry) {
       if (r.ok && buf.length > 200 && !(buf[0] === 0x7b)) return { buf, p };   // 0x7b = '{' כלומר תשובת שגיאה בפורמט JSON
       console.error('DOWNLOAD not a file for', p, 'status', r.status, 'bytes', buf.length, buf.length < 400 ? buf.toString('utf8') : '');
     } catch (e) { console.error('DOWNLOAD failed for', p, e.message); }
+  }
+  await sleep(1500);
   }
   return null;
 }
@@ -1024,7 +964,7 @@ async function saveMemory(phone, history) {
 router.get('/chat', async (call) => {
   console.log('CALL START', call.phone);
   const cfg = await getConfig();
-  const say = async (t) => call.id_list_message(await toMessages(cfg, t, randomUUID().slice(0, 8), 0));
+  const say = (t) => call.id_list_message([{ type: 'text', data: ym(t) }]);
 
   if (!cfg.enabled) { await say(cfg.closedMessage); return call.hangup(); }
   if (!isAllowed(cfg, call.phone)) { await say(cfg.deniedMessage); return call.hangup(); }
@@ -1041,7 +981,7 @@ router.get('/chat', async (call) => {
   while (true) {
     // ההשמעה והאזנה באותה בקשה, כדי לחסוך זמן תגובה
     const fname = `${callId}_${n}`;
-    const rec = await call.read(prompt, 'record', { path: '/ApiRecords', file_name: fname, no_confirm_menu: true, max_length: 40, min_length: 1, quiet_max: Number(process.env.QUIET_MAX || 2), ...(process.env.QUIET_ENGINE === 'yes' ? { use_records_recognition_engine: true } : {}) });
+    const rec = await call.read(prompt, 'record', { path: '/ApiRecords', file_name: fname, no_confirm_menu: true, max_length: 40, min_length: 1, quiet_max: 4, ...(process.env.QUIET_ENGINE === 'yes' ? { use_records_recognition_engine: true } : {}) });
     console.log('RECORD RETURNED:', JSON.stringify(rec));
     let text = '';
     const got = await downloadRecording([`/ApiRecords/${fname}.wav`, typeof rec === 'string' ? (rec.startsWith('/') ? rec : '/' + rec) : '']);
