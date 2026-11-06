@@ -612,7 +612,7 @@ async function renderXlsx(title, blocks) {
 
 async function renderPdf(title, blocks) {
   const PDFDocument = (await import('pdfkit')).default;
-  // בלי פונט עברי, PDF מציג עברית כריבועים או כלום. מומלץ לשים קובץ TTF בתיקיה fonts בפרויקט
+  // בלי פונט עברי, PDF מציג עברית כריבועים או כלום. הנתיב נקבע ב-HEBREW_FONT_PATH
   const fontPath = process.env.HEBREW_FONT_PATH || './fonts/NotoSansHebrew-Regular.ttf';
   const doc = new PDFDocument({ size: 'A4', margin: 50 });
   const chunks = [];
@@ -620,25 +620,47 @@ async function renderPdf(title, blocks) {
   const done = new Promise((res, rej) => { doc.on('end', res); doc.on('error', rej); });
   if (fontPath && fs.existsSync(fontPath)) doc.font(fontPath);
   else console.error('NO HEBREW FONT FOUND, PDF Hebrew text will be broken. Path tried:', fontPath);
-  const W = doc.page.width - 100;
-  const para = (text, size) => {
+
+  const LEFT = 50, RIGHT = doc.page.width - 50, W = RIGHT - LEFT;
+  const HEB = /[\u0590-\u05FF]/;
+  // PDFKit כותב משמאל לימין ולא מבין עברית. לכן כל מילה עברית מתהפכת בתווים, והמילים מונחות מימין לשמאל
+  const visualWord = (w) => (HEB.test(w) ? [...w].reverse().join('') : w);
+
+  const para = (text, size, gap = 0.4) => {
     doc.fontSize(size);
-    const out = [];
-    let line = '';
+    const space = doc.widthOfString(' ');
+    const lines = [];
+    let cur = [], curW = 0;
     for (const w of String(text).split(/\s+/).filter(Boolean)) {
-      const cand = line ? `${line} ${w}` : w;
-      if (line && doc.widthOfString(cand) > W) { out.push(line); line = w; } else line = cand;
+      const ww = doc.widthOfString(visualWord(w));
+      const add = cur.length ? curW + space + ww : ww;
+      if (cur.length && add > W) { lines.push(cur); cur = [w]; curW = ww; }
+      else { cur.push(w); curW = add; }
     }
-    if (line) out.push(line);
-    for (const l of (out.length ? out : [''])) doc.text(visualHebrew(l), 50, doc.y, { width: W, align: 'right' });
-    doc.moveDown(0.4);
+    if (cur.length) lines.push(cur);
+    if (!lines.length) lines.push([]);
+    for (const words of lines) {
+      if (doc.y + size * 1.4 > doc.page.height - 50) doc.addPage();
+      const y = doc.y;
+      let x = RIGHT;
+      // המילה הראשונה בטקסט היא הימנית ביותר
+      for (const w of words) {
+        const v = visualWord(w);
+        x -= doc.widthOfString(v);
+        doc.text(v, x, y, { lineBreak: false });
+        x -= space;
+      }
+      doc.y = y + size * 1.4;
+    }
+    doc.y += size * gap;
   };
+
   para(title, 20);
   for (const b of blocks) {
     if (b.type === 'h1') para(b.text, 16);
     else if (b.type === 'h2') para(b.text, 13);
     else if (b.type === 'bullet') para(`• ${b.text}`, 11);
-    else if (b.type === 'table') for (const r of b.rows || []) para(r.join(' | '), 10);
+    else if (b.type === 'table') for (const r of b.rows || []) para(r.join('  |  '), 10);
     else para(b.text || '', 11);
   }
   doc.end();
