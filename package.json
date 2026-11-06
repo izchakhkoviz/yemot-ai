@@ -2,7 +2,7 @@
   "name": "yemot-ai-ivr",
   "version": "1.0.0",
   "type": "module",
-  "main": "server-v28.js",
+  "main": "server-v21.js",
   "scripts": { "start": "node server-v28.js" },
   "engines": { "node": ">=20" },
   "dependencies": {
@@ -12,10 +12,6 @@
     "@google-cloud/text-to-speech": "latest",
     "@google-cloud/speech": "latest",
     "@google-cloud/firestore": "latest",
-    "@google-cloud/storage": "^7.14.0",
-    "nodemailer": "latest",
-    "docx": "^9.0.0",
-    "pdfkit": "^0.15.0",
-    "exceljs": "^4.4.0"
+    "nodemailer": "latest"
   }
 }
